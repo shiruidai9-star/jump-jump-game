@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>跳一跳</title>
+<style>
+  /* 全屏、禁止选择/滚动/长按菜单 */
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#e8ecf1;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+    -webkit-tap-highlight-color:transparent;touch-action:none;overscroll-behavior:none;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  #game{position:fixed;left:0;top:0;width:100vw;height:100vh;height:100dvh;display:block}
+  #score{position:fixed;left:20px;top:calc(16px + env(safe-area-inset-top));font-size:40px;font-weight:bold;color:#333;pointer-events:none}
+  #tip{position:fixed;left:0;right:0;bottom:calc(40px + env(safe-area-inset-bottom));text-align:center;color:#888;font-size:15px;pointer-events:none}
+  #over{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;flex-direction:column;color:#fff}
+  #over .t{font-size:20px;opacity:.85}
+  #over .s{font-size:72px;font-weight:bold;margin:10px 0 30px}
+  #restart{font-size:20px;padding:12px 40px;border:0;border-radius:28px;background:#fff;color:#333;cursor:pointer}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="score">0</div>
+<div id="tip">长按屏幕（或按住空格）蓄力，松开跳跃</div>
+<div id="over"><div class="t">本局得分</div><div class="s" id="final">0</div><button id="restart">重新开始</button></div>
+<script>
+(function(){
+'use strict';
+/* ========== 基本设置 ========== */
+var canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+var scoreEl=document.getElementById('score'), overEl=document.getElementById('over'),
+    finalEl=document.getElementById('final'), tipEl=document.getElementById('tip');
+var W=0,H=0,DPR=1;
+
+/* 世界坐标：x 轴向右前方，z 轴向左前方，y 向上。等轴测投影到屏幕。 */
+var COS=Math.cos(Math.PI/6), SIN=0.5;
+var cam={x:0,z:0};          // 相机注视点（世界坐标，平滑跟随）
+var camTarget={x:0,z:0};
+var SCALE=1;                // 根据屏幕宽度缩放
+
+function project(x,y,z){
+  var dx=x-cam.x, dz=z-cam.z;
+  return {x:W/2+(dx-dz)*COS*SCALE, y:H*0.62-(dx+dz)*SIN*SCALE-y*SCALE};
+}
+
+/* 适配窗口尺寸与高清屏 */
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,3);
+  W=window.innerWidth; H=window.innerHeight;
+  canvas.width=W*DPR; canvas.height=H*DPR;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  SCALE=Math.min(W,H*0.6)/380;
+}
+window.addEventListener('resize',resize);
+
+/* ========== 游戏参数 ========== */
+var BLOCK_H=30;              // 方块高度
+var MAX_CHARGE=1.6;          // 最长蓄力时间（秒）
+var SPEED=230;               // 每秒蓄力对应跳跃距离
+var JUMP_TIME=0.5;           // 跳跃滞空时间（秒）
+var COLORS=['#f2b84b','#6cc3a0','#6aa8e8','#e9806e','#b49be0','#9fb3c8','#f0d264'];
+
+var blocks, player, score, state, chargeStart, jump, fall;
+// state: 'idle' 待机 | 'charge' 蓄力 | 'jump' 跳跃 | 'fall' 掉落 | 'over' 结束
+
+/* 生成一个方块：在上一个方块前左(z)或前右(x)方向 */
+function makeBlock(prev){
+  var size=22+Math.random()*22;                 // 半边长随机
+  var b={x:0,z:0,s:size,color:COLORS[Math.floor(Math.random()*COLORS.length)],press:0};
+  if(prev){
+    var gap=prev.s+size+15+Math.random()*90;    // 间距随机
+    b.dir=Math.random()<0.5?'x':'z';
+    b.x=prev.x+(b.dir==='x'?gap:0);
+    b.z=prev.z+(b.dir==='z'?gap:0);
+  }
+  return b;
+}
+
+function reset(){
+  blocks=[makeBlock(null)];
+  blocks[0].s=36;
+  blocks.push(makeBlock(blocks[0]));
+  player={x:0,y:BLOCK_H,z:0,squash:0,rot:0};
+  score=0; scoreEl.textContent='0';
+  state='idle'; jump=null; fall=null;
+  overEl.style.display='none';
+  updateCamTarget(); cam.x=camTarget.x; cam.z=camTarget.z;
+}
+
+function cur(){return blocks[blocks.length-2];}
+function next(){return blocks[blocks.length-1];}
+function updateCamTarget(){
+  camTarget.x=(cur().x+next().x)/2; camTarget.z=(cur().z+next().z)/2;
+}
+function onBlock(b,x,z){return Math.abs(x-b.x)<=b.s && Math.abs(z-b.z)<=b.s;}
+
+/* ========== 输入：蓄力与起跳 ========== */
+function press(){
+  if(state!=='idle')return;
+  state='charge'; chargeStart=performance.now(); tipEl.style.display='none';
+}
+function release(){
+  if(state!=='charge')return;
+  var t=Math.min((performance.now()-chargeStart)/1000,MAX_CHARGE);
+  var dist=t*SPEED;
+  // 跳跃方向：朝向下一个方块中心
+  var n=next(), dx=n.x-player.x, dz=n.z-player.z, len=Math.hypot(dx,dz)||1;
+  jump={sx:player.x,sz:player.z,ex:player.x+dx/len*dist,ez:player.z+dz/len*dist,t:0,dir:n.dir};
+  cur().press=0; player.squash=0;
+  state='jump';
+}
+// 触摸
+canvas.addEventListener('touchstart',function(e){e.preventDefault();press();},{passive:false});
+canvas.addEventListener('touchend',function(e){e.preventDefault();release();},{passive:false});
+canvas.addEventListener('touchcancel',function(e){e.preventDefault();release();},{passive:false});
+// 鼠标
+canvas.addEventListener('mousedown',function(e){if(e.button===0)press();});
+window.addEventListener('mouseup',release);
+// 键盘空格
+window.addEventListener('keydown',function(e){if(e.code==='Space'||e.keyCode===32){e.preventDefault();if(!e.repeat)press();}});
+window.addEventListener('keyup',function(e){if(e.code==='Space'||e.keyCode===32){e.preventDefault();release();}});
+// 禁止长按菜单、双指缩放
+document.addEventListener('contextmenu',function(e){e.preventDefault();});
+document.addEventListener('gesturestart',function(e){e.preventDefault();});
+document.addEventListener('touchmove',function(e){e.preventDefault();},{passive:false});
+document.getElementById('restart').addEventListener('click',function(e){e.stopPropagation();reset();});
+
+/* ========== 逻辑更新 ========== */
+function update(dt){
+  if(state==='charge'){
+    var k=Math.min((performance.now()-chargeStart)/1000,MAX_CHARGE)/MAX_CHARGE;
+    player.squash=k*0.4; cur().press=k*0.25;      // 小人压扁、方块下压
+    player.y=BLOCK_H*(1-cur().press);
+  }
+  else if(state==='jump'){
+    jump.t+=dt/JUMP_TIME; var p=Math.min(jump.t,1);
+    player.x=jump.sx+(jump.ex-jump.sx)*p;
+    player.z=jump.sz+(jump.ez-jump.sz)*p;
+    player.y=BLOCK_H+Math.sin(p*Math.PI)*90;      // 抛物线高度
+    player.rot=p*Math.PI*2;                       // 空翻
+    if(p>=1){ player.rot=0; land(); }
+  }
+  else if(state==='fall'){
+    player.y-=dt*260;
+    if(player.y<=0){player.y=0; gameOver();}
+  }
+  // 方块按压回弹
+  blocks.forEach(function(b){ if(state!=='charge'||b!==cur()) b.press*=0.8; });
+  // 相机平滑跟随
+  cam.x+=(camTarget.x-cam.x)*Math.min(1,dt*5);
+  cam.z+=(camTarget.z-cam.z)*Math.min(1,dt*5);
+}
+
+/* 落地判定 */
+function land(){
+  var x=player.x,z=player.z;
+  if(onBlock(next(),x,z)){                       // 跳到下一个方块：+1
+    player.y=BLOCK_H; score++; scoreEl.textContent=score;
+    blocks.push(makeBlock(next()));
+    if(blocks.length>8)blocks.shift();
+    updateCamTarget(); state='idle';
+  } else if(onBlock(cur(),x,z)){                 // 还在当前方块：不加分
+    player.y=BLOCK_H; state='idle';
+  } else { state='fall'; }                       // 没落到方块：掉落
+}
+function gameOver(){
+  state='over'; finalEl.textContent=score;
+  setTimeout(function(){overEl.style.display='flex';},300);
+}
+
+/* ========== 绘制 ========== */
+function poly(pts,color){
+  ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+  for(var i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);
+  ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+}
+// 颜色明暗调整，用于立方体侧面阴影
+function shade(hex,f){
+  var n=parseInt(hex.slice(1),16),r=(n>>16)*f,g=(n>>8&255)*f,b=(n&255)*f;
+  return 'rgb('+Math.min(255,r|0)+','+Math.min(255,g|0)+','+Math.min(255,b|0)+')';
+}
+function drawBlock(b){
+  var s=b.s, h=BLOCK_H*(1-b.press);
+  // 地面阴影
+  var o=4;
+  poly([project(b.x-s+o,0,b.z-s-o*3),project(b.x+s+o,0,b.z-s-o*3),project(b.x+s+o,0,b.z+s-o*3),project(b.x-s+o,0,b.z+s-o*3)],'rgba(0,0,0,0.08)');
+  var A=project(b.x-s,h,b.z-s),B=project(b.x+s,h,b.z-s),C=project(b.x+s,h,b.z+s),D=project(b.x-s,h,b.z+s);
+  var A0=project(b.x-s,0,b.z-s),B0=project(b.x+s,0,b.z-s),D0=project(b.x-s,0,b.z+s);
+  poly([A,B,B0,A0],shade(b.color,0.82));   // 右前侧面
+  poly([A,D,D0,A0],shade(b.color,0.68));   // 左前侧面
+  poly([A,B,C,D],b.color);                 // 顶面
+}
+function drawPlayer(){
+  var p=player, sq=p.squash;
+  // 脚下阴影（仅站在方块上或跳跃时）
+  if(state!=='fall'&&state!=='over'){
+    var g=project(p.x,BLOCK_H,p.z);
+    ctx.fillStyle='rgba(0,0,0,0.18)';
+    ctx.beginPath(); ctx.ellipse(g.x,g.y,9*SCALE,5*SCALE,0,0,Math.PI*2); ctx.fill();
+  }
+  var base=project(p.x,p.y,p.z);
+  ctx.save(); ctx.translate(base.x,base.y);
+  // 空翻旋转（围绕身体中心）
+  if(p.rot){ctx.translate(0,-22*SCALE); ctx.rotate(jump&&jump.dir==='z'?-p.rot:p.rot); ctx.translate(0,22*SCALE);}
+  ctx.scale(SCALE*(1+sq*0.3),SCALE*(1-sq));
+  // 身体（梯形）
+  ctx.fillStyle='#3d3d55';
+  ctx.beginPath(); ctx.moveTo(-9,0); ctx.lineTo(9,0); ctx.lineTo(5,-30); ctx.lineTo(-5,-30); ctx.closePath(); ctx.fill();
+  // 头
+  ctx.beginPath(); ctx.arc(0,-38,7,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function render(){
+  ctx.clearRect(0,0,W,H);
+  var g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#f4f6f9'); g.addColorStop(1,'#d9dfe7');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // 远的先画（x+z 越大越远），小人插在合适的深度
+  var list=blocks.slice().sort(function(a,b){return (b.x+b.z)-(a.x+a.z);});
+  var pd=player.x+player.z, drawn=false;
+  // 掉落时小人在方块之下，先画
+  if(state==='fall'||state==='over'){drawPlayer();drawn=true;}
+  for(var i=0;i<list.length;i++){
+    var b=list[i];
+    if(!drawn && b.x+b.z < pd-b.s*0.5){drawPlayer();drawn=true;}
+    drawBlock(b);
+  }
+  if(!drawn)drawPlayer();
+}
+
+/* ========== 主循环 ========== */
+var last=performance.now();
+function loop(now){
+  var dt=Math.min((now-last)/1000,0.05); last=now;
+  update(dt); render();
+  requestAnimationFrame(loop);
+}
+resize(); reset(); requestAnimationFrame(loop);
+// 测试用接口
+window.__game={get state(){return state;},get score(){return score;},need:function(){var n=next();return Math.hypot(n.x-player.x,n.z-player.z)/SPEED;}};
+})();
+</script>
+</body>
+</html>
