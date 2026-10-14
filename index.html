@@ -18,11 +18,14 @@
   #over .t{font-size:20px;opacity:.85}
   #over .s{font-size:72px;font-weight:bold;margin:10px 0 30px}
   #restart{font-size:20px;padding:12px 40px;border:0;border-radius:28px;background:#fff;color:#333;cursor:pointer}
+  #mute{position:fixed;right:16px;top:calc(18px + env(safe-area-inset-top));width:44px;height:44px;border:0;border-radius:22px;
+    background:rgba(255,255,255,.7);font-size:22px;line-height:44px;padding:0;cursor:pointer;z-index:5}
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <div id="score">0</div>
+<button id="mute" aria-label="静音">🔊</button>
 <div id="tip">长按屏幕（或按住空格）蓄力，松开跳跃</div>
 <div id="over"><div class="t">本局得分</div><div class="s" id="final">0</div><button id="restart">重新开始</button></div>
 <script>
@@ -50,6 +53,72 @@ function resize(){
   SCALE=Math.min(W,H*0.6)/380;
 }
 window.addEventListener('resize',resize);
+
+
+/* ================= 音效（Web Audio 实时合成，无外部文件） ================= */
+var Sound=(function(){
+  var AC=window.AudioContext||window.webkitAudioContext, ac=null, master=null, chargeOsc=null, chargeGain=null;
+  var muted=false; try{muted=localStorage.getItem('jump_muted')==='1';}catch(e){}
+  // 首次用户操作时创建/恢复音频环境（iOS 需要在手势中播放一段静音来解锁）
+  function unlock(){
+    if(!AC)return;
+    try{
+      if(!ac){ac=new AC();master=ac.createGain();master.gain.value=0.35;master.connect(ac.destination);
+        var b=ac.createBuffer(1,1,22050),src=ac.createBufferSource();src.buffer=b;src.connect(ac.destination);src.start(0);}
+      if(ac.state==='suspended')ac.resume();
+    }catch(e){ac=null;}
+  }
+  function ok(){return ac&&!muted;}
+  // 播放一个音：频率、开始偏移、时长、波形、音量、可选结束频率
+  function tone(f,at,dur,type,vol,f2){
+    if(!ok())return;
+    try{var t=ac.currentTime+(at||0),o=ac.createOscillator(),g=ac.createGain();
+      o.type=type||'sine';o.frequency.setValueAtTime(f,t);if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+dur);
+      g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol||0.3,t+0.01);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      o.connect(g);g.connect(master);o.start(t);o.stop(t+dur+0.05);}catch(e){}
+  }
+  // 噪声（用于起跳“呼”声）
+  function noise(dur,vol,from,to){
+    if(!ok())return;
+    try{var n=Math.floor(ac.sampleRate*dur),buf=ac.createBuffer(1,n,ac.sampleRate),d=buf.getChannelData(0);
+      for(var i=0;i<n;i++)d[i]=Math.random()*2-1;
+      var src=ac.createBufferSource(),f=ac.createBiquadFilter(),g=ac.createGain(),t=ac.currentTime;
+      src.buffer=buf;f.type='bandpass';f.Q.value=1.5;f.frequency.setValueAtTime(from,t);f.frequency.exponentialRampToValueAtTime(to,t+dur);
+      g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      src.connect(f);f.connect(g);g.connect(master);src.start(t);}catch(e){}
+  }
+  function melody(notes,type){notes.forEach(function(n,i){tone(n,i*0.12,0.18,type||'triangle',0.25);});}
+  return {
+    unlock:unlock,
+    isMuted:function(){return muted;},
+    setMuted:function(m){muted=m;try{localStorage.setItem('jump_muted',m?'1':'0');}catch(e){} if(m)this.chargeStop();},
+    // 蓄力：音调随按住时间上升
+    chargeStart:function(max){
+      if(!ok())return;
+      try{this.chargeStop();var t=ac.currentTime;chargeOsc=ac.createOscillator();chargeGain=ac.createGain();
+        chargeOsc.type='triangle';chargeOsc.frequency.setValueAtTime(220,t);chargeOsc.frequency.linearRampToValueAtTime(880,t+max);
+        chargeGain.gain.setValueAtTime(0.0001,t);chargeGain.gain.exponentialRampToValueAtTime(0.12,t+0.1);
+        chargeOsc.connect(chargeGain);chargeGain.connect(master);chargeOsc.start(t);}catch(e){}
+    },
+    chargeStop:function(){
+      if(!chargeOsc)return;
+      try{var t=ac.currentTime;chargeGain.gain.cancelScheduledValues(t);chargeGain.gain.setValueAtTime(chargeGain.gain.value,t);
+        chargeGain.gain.exponentialRampToValueAtTime(0.0001,t+0.05);chargeOsc.stop(t+0.08);}catch(e){}
+      chargeOsc=null;chargeGain=null;
+    },
+    jump:function(){noise(0.25,0.4,600,2500);},
+    land:function(){tone(140,0,0.15,'sine',0.5,60);},
+    // 命中中心：连击越多音调越高（五声音阶逐级上升）
+    center:function(combo){var sc=[523,587,659,784,880,1047,1175,1319,1568,1760],f=sc[Math.min(combo-1,sc.length-1)];
+      tone(f,0,0.4,'sine',0.3);tone(f*2,0.02,0.3,'sine',0.1);},
+    special:function(type){
+      if(type==='gift')melody([784,988,1175,1568]);                 // 礼物盒：欢快上行
+      else if(type==='record')melody([523,659,784,659,523,784],'sine'); // 唱片：小旋律
+      else melody([659,659,880,1047],'square');                       // 魔方：电子音
+    },
+    fall:function(){tone(440,0,0.6,'sawtooth',0.12,110);tone(330,0.55,0.4,'triangle',0.2,220);}
+  };
+})();
 
 /* ================= 参数 ================= */
 var BLOCK_H=30;          // 平台高度
@@ -108,15 +177,24 @@ function addScore(n,x,z,color){
 }
 
 /* ================= 输入 ================= */
-function press(){ if(state!=='idle')return; state='charge'; chargeStart=performance.now(); tipEl.style.display='none'; }
+function press(){ if(state!=='idle')return; state='charge'; chargeStart=performance.now(); tipEl.style.display='none'; Sound.chargeStart(MAX_CHARGE); }
 function release(){ if(state!=='charge')return; doJump(Math.min((performance.now()-chargeStart)/1000,MAX_CHARGE)); }
 // 按蓄力秒数起跳（朝下一个平台中心方向）
 function doJump(t){
   var dist=Math.min(t,MAX_CHARGE)*SPEED, n=next();
   var dx=n.x-player.x,dz=n.z-player.z,len=Math.hypot(dx,dz)||1;
   jump={sx:player.x,sz:player.z,ex:player.x+dx/len*dist,ez:player.z+dz/len*dist,t:0,dir:n.dir};
-  player.squash=0; particles=[]; state='jump';
+  player.squash=0; particles=[]; state='jump'; Sound.chargeStop(); Sound.jump();
 }
+// 首次手势解锁音频
+['touchstart','touchend','mousedown','keydown'].forEach(function(ev){document.addEventListener(ev,Sound.unlock,{capture:true,passive:true});});
+// 静音按钮：阻止事件冒泡，不触发跳跃
+var muteBtn=document.getElementById('mute');
+function syncMute(){muteBtn.textContent=Sound.isMuted()?'🔇':'🔊';}
+syncMute();
+['touchstart','mousedown'].forEach(function(ev){muteBtn.addEventListener(ev,function(e){e.stopPropagation();},{passive:true});});
+muteBtn.addEventListener('click',function(e){e.stopPropagation();Sound.setMuted(!Sound.isMuted());syncMute();muteBtn.blur();});
+muteBtn.addEventListener('keydown',function(e){e.preventDefault();});
 canvas.addEventListener('touchstart',function(e){e.preventDefault();press();},{passive:false});
 canvas.addEventListener('touchend',function(e){e.preventDefault();release();},{passive:false});
 canvas.addEventListener('touchcancel',function(e){e.preventDefault();release();},{passive:false});
@@ -147,7 +225,7 @@ function update(dt){
   else if(state==='idle'){
     // 特殊平台停留计时
     var c=cur(); standTime+=dt;
-    if(c.special&&!c.awarded&&standTime>=SPECIAL_WAIT){c.awarded=true;addScore(5,c.x,c.z,'#e9806e');}
+    if(c.special&&!c.awarded&&standTime>=SPECIAL_WAIT){c.awarded=true;addScore(5,c.x,c.z,'#e9806e');Sound.special(c.type);}
   }
   else if(state==='tilt'){              // 脚跨边缘：先向外倾倒再掉落
     player.tilt+=dt*4;
@@ -171,21 +249,21 @@ function land(){
   var x=player.x,z=player.z,n=next(),c=cur();
   var hn=hitTest(n,x,z), hc=hitTest(c,x,z);
   if(hn==='in'){
-    player.y=BLOCK_H; standTime=0;
+    player.y=BLOCK_H; standTime=0; Sound.land();
     rings.push({x:x,z:z,t:0,white:false,r:12});         // 落地小圈（尘土）
     if(Math.hypot(x-n.x,z-n.z)<=CENTER_R){               // 命中中心：+2，连击翻倍
-      combo++; addScore(2*combo,x,z,'#fff');
+      combo++; addScore(2*combo,x,z,'#fff'); Sound.center(combo);
       rings.push({x:n.x,z:n.z,t:0,white:true,r:n.s});
     } else { combo=0; addScore(1,x,z); }
     blocks.push(makeBlock(n)); if(blocks.length>8)blocks.shift();
     updateCamTarget(); state='idle';
   } else if(hc==='in'){                                  // 仍在原平台：不加分
-    player.y=BLOCK_H; state='idle';
+    player.y=BLOCK_H; state='idle'; Sound.land();
   } else if(hn==='edge'||hc==='edge'){                   // 跨在边缘：倾倒后掉落
     var b=hn==='edge'?n:c, dx=x-b.x, dz=z-b.z, l=Math.hypot(dx,dz)||1;
     if(!b.round){ if(Math.abs(dx)>Math.abs(dz)){dx=Math.sign(dx);dz=0;}else{dz=Math.sign(dz);dx=0;} l=1; }
-    player.tdx=dx/l; player.tdz=dz/l; player.y=BLOCK_H; player.tilt=0.01; state='tilt';
-  } else state='fall';
+    player.tdx=dx/l; player.tdz=dz/l; player.y=BLOCK_H; player.tilt=0.01; state='tilt'; Sound.fall();
+  } else { state='fall'; Sound.fall(); }
 }
 function gameOver(){state='over';finalEl.textContent=score;setTimeout(function(){overEl.style.display='flex';},300);}
 
