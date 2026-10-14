@@ -297,9 +297,10 @@ var blocks,player,score,state,chargeStart,jump,combo,particles,popups,rings,stan
 function makeBlock(prev){
   var type;
   if(window.__forceType){type=window.__forceType;window.__forceType=null;}
-  else{ // 约 22% 特殊平台（旧 3 种 + 新 5 种），危险平台不连续
+  else{ // 旧 3 种 + 新 5 种特殊平台随机，危险平台不连续
     var r=Math.random(), all=SPECIALS.concat(NEWTYPES);
-    if(prev&&r<0.14){  // 特殊平台约 14% do{type=all[Math.floor(Math.random()*all.length)];}
+    // 特殊平台约 14%
+    if(prev&&r<0.14){ do{type=all[Math.floor(Math.random()*all.length)];}
       while(HAZARDS.indexOf(type)>=0&&(HAZARDS.indexOf(prev.type)>=0||prev.type==='spring')); }
     else type=r<0.5?'cyl':'cube'; }
   var s=22+Math.random()*20;
@@ -605,7 +606,7 @@ window.__game={get state(){return state;},get score(){return score;},get combo()
   jump:function(t){if(state==='idle')doJump(t);},nextType:function(){return next().type;},nextS:function(){return next().s;},curType:function(){return cur().type;},get doubleLeft(){return doubleLeft;},
   setBest:function(n){best=n;lsSet('jump_best',String(n));runBestStart=n;},get best(){return best;},get skin(){return skin;},
   addScore:function(n){addScore(n,player.x,player.z);},
-  specialRate:function(N){var c=0,p=blocks[0],keep=seenTypes;seenTypes=new Proxy({},{get:function(){return 1;}});for(var i=0;i<N;i++){var b=makeBlock(p);if(b.type!=='cube'&&b.type!=='cyl')c++;}seenTypes=keep;return c/N;},
+  specialRate:function(N){var c=0,p=blocks[0],keep=seenTypes;seenTypes=new Proxy({},{get:function(){return 1;}});for(var i=0;i<N;i++){var b=makeBlock(p);if(SPECIALS.concat(NEWTYPES).indexOf(b.type)>=0)c++;else if(b.type!=='cube'&&b.type!=='cyl')c+=1e6;}seenTypes=keep;return c/N;},
   draw:function(x,f){drawNaiwa(x,f,0);},nextDir:function(){return next().dir;},playerScreen:function(){var q=project(player.x,player.y,player.z);return [q.x,q.y];},
   onCenter:function(){var c=cur();return Math.hypot(player.x-c.x,player.z-c.z)<1;}};
 })();
